@@ -29,6 +29,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -266,13 +267,11 @@ object MediaRepository {
     private fun startDemo() {
         loadDemoTrack(demoIndex, playing = true)
         demoTicker?.cancel()
+        // Sleeps until the current track ends instead of polling (battery).
         demoTicker = scope.launch {
-            while (true) {
-                delay(500L)
-                val s = demoState.value
-                if (s.isPlaying && s.durationMs > 0 &&
-                    s.positionAt(SystemClock.elapsedRealtime()) >= s.durationMs
-                ) {
+            demoState.collectLatest { s ->
+                if (s.isActive && s.isPlaying && s.durationMs > 0) {
+                    delay((s.durationMs - s.positionAt(SystemClock.elapsedRealtime())).coerceAtLeast(0L))
                     loadDemoTrack(demoIndex + 1, playing = true)
                 }
             }
@@ -383,21 +382,28 @@ object MediaRepository {
     }
 
     private fun extractPalette(bmp: Bitmap): ArtPalette {
-        val p = Palette.from(bmp).maximumColorCount(16).generate()
-        val dominant = p.getDominantColor(0xFF303030.toInt())
-        val vibrant = p.getVibrantColor(p.getLightVibrantColor(p.getMutedColor(dominant)))
-
-        val containerHsl = FloatArray(3).also { ColorUtils.colorToHSL(dominant, it) }
-        containerHsl[1] = containerHsl[1].coerceAtMost(0.55f)
-        containerHsl[2] = containerHsl[2].coerceIn(0.10f, 0.20f)
-        val container = ColorUtils.HSLToColor(containerHsl)
-
-        val accentHsl = FloatArray(3).also { ColorUtils.colorToHSL(vibrant, it) }
-        accentHsl[1] = accentHsl[1].coerceAtLeast(0.45f)
-        accentHsl[2] = accentHsl[2].coerceIn(0.62f, 0.80f)
-        val accent = ColorUtils.HSLToColor(accentHsl)
-
-        return ArtPalette(container = container, accent = accent, onContainer = 0xFFF2F0F4.toInt())
+        val p = Palette.from(bmp).maximumColorCount(24).generate()
+        val dominant = p.getDominantColor(0xFF6750A4.toInt())
+        // Prefer a vivid swatch for the hue so the card is colorful, not muddy brown.
+        val seed = p.vibrantSwatch?.rgb
+            ?: p.lightVibrantSwatch?.rgb
+            ?: p.darkVibrantSwatch?.rgb
+            ?: p.mutedSwatch?.rgb
+            ?: dominant
+        val hsl = FloatArray(3).also { ColorUtils.colorToHSL(seed, it) }
+        val hue = hsl[0]
+        val sat = hsl[1]
+        fun tone(s: Float, l: Float) = ColorUtils.HSLToColor(floatArrayOf(hue, s.coerceIn(0f, 1f), l))
+        return ArtPalette(
+            container = tone(minOf(sat, 0.38f), 0.115f),
+            containerHigh = tone(minOf(sat, 0.34f), 0.185f),
+            onContainer = tone(0.18f, 0.94f),
+            onContainerVariant = tone(0.16f, 0.76f),
+            accent = tone(sat.coerceIn(0.55f, 0.9f), 0.76f),
+            onAccent = tone(0.6f, 0.17f),
+            accentContainer = tone(sat.coerceIn(0.4f, 0.65f), 0.3f),
+            onAccentContainer = tone(0.7f, 0.9f),
+        )
     }
 
     // endregion

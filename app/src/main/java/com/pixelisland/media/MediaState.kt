@@ -4,11 +4,16 @@ import android.graphics.Bitmap
 
 enum class MediaSource { NONE, SESSION, DEMO }
 
-/** Colors extracted from the album art with Palette (ARGB ints). */
+/** A small tonal scheme derived from the album art with Palette (ARGB ints). */
 data class ArtPalette(
     val container: Int,
-    val accent: Int,
+    val containerHigh: Int,
     val onContainer: Int,
+    val onContainerVariant: Int,
+    val accent: Int,
+    val onAccent: Int,
+    val accentContainer: Int,
+    val onAccentContainer: Int,
 )
 
 data class MediaState(

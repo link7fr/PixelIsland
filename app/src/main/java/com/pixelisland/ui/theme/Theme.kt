@@ -1,14 +1,18 @@
 package com.pixelisland.ui.theme
 
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import com.pixelisland.ui.island.SmokeIndication
 
 private val base = Typography()
 
@@ -30,20 +34,20 @@ fun PixelIslandTheme(
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
-    MaterialTheme(
-        colorScheme = if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context),
-        typography = ExpressiveTypography,
-        content = content,
-    )
+    val scheme = if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    MaterialTheme(colorScheme = scheme, typography = ExpressiveTypography) {
+        val smoke = remember(scheme.primary) { SmokeIndication(scheme.primary) }
+        CompositionLocalProvider(LocalIndication provides smoke, content = content)
+    }
 }
 
 /** The island always sits on the black camera area, so it always uses the dark Monet scheme. */
 @Composable
 fun IslandOverlayTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
-    MaterialTheme(
-        colorScheme = dynamicDarkColorScheme(context),
-        typography = ExpressiveTypography,
-        content = content,
-    )
+    val scheme = dynamicDarkColorScheme(context)
+    MaterialTheme(colorScheme = scheme, typography = ExpressiveTypography) {
+        val smoke = remember(scheme.onSurface) { SmokeIndication(scheme.onSurface) }
+        CompositionLocalProvider(LocalIndication provides smoke, content = content)
+    }
 }

@@ -5,6 +5,8 @@ package com.pixelisland.ui.main
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -62,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
@@ -73,7 +76,9 @@ import com.pixelisland.data.Settings
 import com.pixelisland.media.MediaRepository
 import com.pixelisland.overlay.IslandAccessibilityService
 import com.pixelisland.overlay.IslandController
+import com.pixelisland.ui.island.ExpressiveShapes
 import com.pixelisland.ui.island.IslandRoot
+import com.pixelisland.ui.island.MorphShape
 import com.pixelisland.ui.island.islandSpring
 import com.pixelisland.ui.theme.IslandOverlayTheme
 import kotlinx.coroutines.launch
@@ -240,7 +245,7 @@ private fun PermissionCard(
         label = "permContainer",
     )
     val corner by animateDpAsState(if (granted) 32.dp else 20.dp, islandSpring(), label = "permCorner")
-    val badgeCorner by animateDpAsState(if (granted) 24.dp else 14.dp, islandSpring(), label = "badgeCorner")
+    val badgeMorph by animateFloatAsState(if (granted) 1f else 0f, spring(0.55f, 300f), label = "badge")
     Card(
         onClick = onGrant,
         shape = RoundedCornerShape(corner),
@@ -249,8 +254,12 @@ private fun PermissionCard(
         Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(badgeCorner))
+                    .size(52.dp)
+                    .graphicsLayer {
+                        rotationZ = badgeMorph * 40f
+                        shape = MorphShape(ExpressiveShapes.Badge, badgeMorph)
+                        clip = true
+                    }
                     .background(if (granted) scheme.primary else scheme.tertiaryContainer),
                 contentAlignment = Alignment.Center,
             ) {
@@ -258,6 +267,7 @@ private fun PermissionCard(
                     imageVector = if (granted) Icons.Rounded.Check else icon,
                     contentDescription = null,
                     tint = if (granted) scheme.onPrimary else scheme.onTertiaryContainer,
+                    modifier = Modifier.graphicsLayer { rotationZ = -badgeMorph * 40f },
                 )
             }
             Spacer(Modifier.width(16.dp))

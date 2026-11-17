@@ -2,16 +2,24 @@ package com.pixelisland.ui.island
 
 import android.text.format.DateFormat
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector2D
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.VectorConverter
+import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -29,37 +37,50 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pixelisland.data.IslandSettings
 import com.pixelisland.data.Settings
+import com.pixelisland.media.ArtPalette
 import com.pixelisland.media.MediaRepository
 import com.pixelisland.media.MediaState
 import com.pixelisland.overlay.IslandController
@@ -68,7 +89,11 @@ import com.pixelisland.system.SystemRepository
 import com.pixelisland.timer.TimerMode
 import com.pixelisland.timer.TimerRepository
 import com.pixelisland.timer.TimerState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
@@ -77,10 +102,70 @@ private enum class IslandVisual { IDLE, COMPACT, SPLIT, EXPANDED }
 private enum class LeftSlot { TIMER, CLOCK, ART }
 private enum class RightSlot { MEDIA, BATTERY }
 
+/** Material 3 emphasized easings. */
+private val EmphasizedDecelerate = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)
+private val EmphasizedAccelerate = CubicBezierEasing(0.3f, 0f, 0.8f, 0.15f)
+
+/** Shape/size spring for the morph: fast with a gentle overshoot, like the iPhone island. */
+private val MorphSpring = spring(dampingRatio = 0.74f, stiffness = 360f, visibilityThreshold = IntSize(1, 1))
+
+@Immutable
+data class IslandColors(
+    val container: Color,
+    val containerHigh: Color,
+    val content: Color,
+    val contentVariant: Color,
+    val accent: Color,
+    val onAccent: Color,
+    val accentContainer: Color,
+    val onAccentContainer: Color,
+)
+
+private fun colorsFor(palette: ArtPalette?, scheme: ColorScheme): IslandColors =
+    if (palette != null) {
+        IslandColors(
+            container = Color(palette.container),
+            containerHigh = Color(palette.containerHigh),
+            content = Color(palette.onContainer),
+            contentVariant = Color(palette.onContainerVariant),
+            accent = Color(palette.accent),
+            onAccent = Color(palette.onAccent),
+            accentContainer = Color(palette.accentContainer),
+            onAccentContainer = Color(palette.onAccentContainer),
+        )
+    } else {
+        IslandColors(
+            container = scheme.surfaceContainer,
+            containerHigh = scheme.surfaceContainerHighest,
+            content = scheme.onSurface,
+            contentVariant = scheme.onSurfaceVariant,
+            accent = scheme.primary,
+            onAccent = scheme.onPrimary,
+            accentContainer = scheme.primaryContainer,
+            onAccentContainer = scheme.onPrimaryContainer,
+        )
+    }
+
+@Composable
+private fun animateIslandColors(target: IslandColors): IslandColors {
+    val spec = spring<Color>(stiffness = Spring.StiffnessLow)
+    val container by animateColorAsState(target.container, spec, label = "c1")
+    val containerHigh by animateColorAsState(target.containerHigh, spec, label = "c2")
+    val content by animateColorAsState(target.content, spec, label = "c3")
+    val contentVariant by animateColorAsState(target.contentVariant, spec, label = "c4")
+    val accent by animateColorAsState(target.accent, spec, label = "c5")
+    val onAccent by animateColorAsState(target.onAccent, spec, label = "c6")
+    val accentContainer by animateColorAsState(target.accentContainer, spec, label = "c7")
+    val onAccentContainer by animateColorAsState(target.onAccentContainer, spec, label = "c8")
+    return IslandColors(container, containerHigh, content, contentVariant, accent, onAccent, accentContainer, onAccentContainer)
+}
+
 /**
- * The whole island. Used by the overlay service and by the live preview in the app.
- * One container morphs its size/corner/color with spring physics while the content
- * inside cross-fades between states.
+ * The whole island, used by the overlay service and by the live preview in the app.
+ *
+ * One container morphs size + corner radius on a spring (iPhone-style). The content inside
+ * cross-fades with scale + blur; the outgoing content reports zero size so the container
+ * immediately heads for the new size instead of waiting for the fade-out.
  */
 @Composable
 fun IslandRoot(controller: IslandController, maxExpandedWidth: Dp, modifier: Modifier = Modifier) {
@@ -109,6 +194,7 @@ fun IslandRoot(controller: IslandController, maxExpandedWidth: Dp, modifier: Mod
         settings.splitPill && media.isActive && left != null && left != LeftSlot.ART -> IslandVisual.SPLIT
         else -> IslandVisual.COMPACT
     }
+    val isExpanded = visual == IslandVisual.EXPANDED
 
     LaunchedEffect(controller.snoozed) {
         if (controller.snoozed) {
@@ -124,34 +210,39 @@ fun IslandRoot(controller: IslandController, maxExpandedWidth: Dp, modifier: Mod
     }
 
     val scheme = MaterialTheme.colorScheme
-    val palette = media.palette
-    val expandedContainer = palette?.let { Color(it.container) } ?: scheme.surfaceContainerHigh
+    val targetColors = colorsFor(media.palette, scheme)
+    val colors = animateIslandColors(targetColors)
+
     val containerColor by animateColorAsState(
         targetValue = when (visual) {
-            IslandVisual.EXPANDED -> expandedContainer
+            IslandVisual.EXPANDED -> targetColors.container
             IslandVisual.SPLIT -> Color.Black.copy(alpha = 0f)
             else -> Color.Black
         },
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        animationSpec = tween(320, easing = EmphasizedDecelerate),
         label = "container",
     )
-    val accent by animateColorAsState(
-        targetValue = palette?.let { Color(it.accent) } ?: scheme.primary,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
-        label = "accent",
-    )
-    val onContainer by animateColorAsState(
-        targetValue = palette?.let { Color(it.onContainer) } ?: scheme.onSurface,
-        label = "onContainer",
-    )
-
     val pillH = settings.pillHeight.dp
     val pillW = settings.pillWidth.dp
-    val corner by animateDpAsState(
-        targetValue = if (visual == IslandVisual.EXPANDED) 36.dp else pillH / 2,
-        animationSpec = islandSpring(),
-        label = "corner",
+    val corner by animateDpAsState(if (isExpanded) 42.dp else pillH / 2, islandSpring(), label = "corner")
+    val shadow by animateDpAsState(if (isExpanded) 22.dp else 0.dp, tween(300), label = "shadow")
+
+    var pressed by remember { mutableStateOf(false) }
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed && !isExpanded) 1.08f else 1f,
+        animationSpec = spring(dampingRatio = 0.5f, stiffness = 600f),
+        label = "press",
     )
+
+    val scope = rememberCoroutineScope()
+    val sizeAnim = remember { Animatable(IntSize.Zero, IntSize.VectorConverter) }
+
+    // Tell the host when the collapse morph has fully settled so it can shrink the window.
+    LaunchedEffect(controller) {
+        snapshotFlow { !controller.expanded && !sizeAnim.isRunning }
+            .distinctUntilChanged()
+            .collect { settled -> if (settled) controller.notifyCollapseSettled() }
+    }
 
     val onTap: () -> Unit = {
         haptics.click()
@@ -169,53 +260,135 @@ fun IslandRoot(controller: IslandController, maxExpandedWidth: Dp, modifier: Mod
             controller.snooze()
         }
     }
+    val gestures = Modifier.islandGestures(onTap, onLongPress, onSwipe) { pressed = it }
+
+    // In the big window the host no longer offsets the window, so we offset the island instead.
+    val hostOffset = if (controller.bigWindow) settings.offsetX.dp else 0.dp
 
     Box(
         modifier
-            .clip(RoundedCornerShape(corner))
-            .background(containerColor),
+            .offset(x = hostOffset)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+                transformOrigin = TransformOrigin(0.5f, 0f)
+                shadowElevation = shadow.toPx()
+                shape = RoundedCornerShape(corner)
+                clip = true
+            }
+            .background(containerColor)
+            .morphSize(sizeAnim, scope),
     ) {
         AnimatedContent(
             targetState = visual,
             transitionSpec = {
-                (fadeIn(tween(200, delayMillis = 80)) +
-                    scaleIn(tween(260, delayMillis = 60), initialScale = 0.9f)) togetherWith
-                    fadeOut(tween(80)) using
-                    SizeTransform(clip = false) { _, _ -> islandSpring() }
+                val expanding = targetState == IslandVisual.EXPANDED
+                val collapsing = initialState == IslandVisual.EXPANDED
+                val top = TransformOrigin(0.5f, 0f)
+                val enter = when {
+                    expanding ->
+                        fadeIn(tween(220, delayMillis = 60)) +
+                            scaleIn(tween(420, delayMillis = 20, easing = EmphasizedDecelerate), initialScale = 0.78f, transformOrigin = top)
+                    collapsing ->
+                        fadeIn(tween(200, delayMillis = 150)) +
+                            scaleIn(tween(300, delayMillis = 120, easing = EmphasizedDecelerate), initialScale = 0.6f)
+                    else ->
+                        fadeIn(tween(200, delayMillis = 60)) +
+                            scaleIn(tween(260, delayMillis = 40, easing = EmphasizedDecelerate), initialScale = 0.8f)
+                }
+                val exit = when {
+                    collapsing ->
+                        fadeOut(tween(150)) +
+                            scaleOut(tween(240, easing = EmphasizedAccelerate), targetScale = 0.72f, transformOrigin = top)
+                    else -> fadeOut(tween(90)) + scaleOut(tween(140), targetScale = 0.7f)
+                }
+                (enter togetherWith exit).using(null as SizeTransform?)
             },
             contentAlignment = Alignment.TopCenter,
             label = "islandState",
         ) { state ->
-            when (state) {
-                IslandVisual.IDLE -> Box(
-                    Modifier
-                        .size(pillH)
-                        .islandGestures(onTap, onLongPress, onSwipe),
-                )
+            val blur by transition.animateDp(
+                transitionSpec = { tween(260) },
+                label = "blur",
+            ) { if (it == EnterExitState.Visible) 0.dp else 14.dp }
+            Box(
+                Modifier
+                    .zeroSizeWhenExiting(transition)
+                    .graphicsLayer {
+                        val r = blur.toPx()
+                        renderEffect = if (r > 0.5f) BlurEffect(r, r, TileMode.Decal) else null
+                    },
+            ) {
+                when (state) {
+                    IslandVisual.IDLE -> Box(Modifier.size(pillH).then(gestures))
 
-                IslandVisual.COMPACT -> CompactPill(
-                    width = pillW, height = pillH, left = left, right = right,
-                    media = media, timer = timer, battery = battery, accent = accent,
-                    modifier = Modifier.islandGestures(onTap, onLongPress, onSwipe),
-                )
-
-                IslandVisual.SPLIT -> SplitPills(
-                    width = pillW, height = pillH, left = left, media = media, timer = timer,
-                    accent = accent, gestures = Modifier.islandGestures(onTap, onLongPress, onSwipe),
-                )
-
-                IslandVisual.EXPANDED -> CompositionLocalProvider(LocalContentColor provides onContainer) {
-                    ExpandedCard(
-                        width = maxExpandedWidth, settings = settings, media = media, timer = timer,
-                        battery = battery, accent = accent, content = onContainer, haptics = haptics,
-                        onCollapse = { haptics.click(); controller.collapse() },
-                        onSnooze = { haptics.gesture(); controller.snooze() },
+                    IslandVisual.COMPACT -> CompactPill(
+                        width = pillW, height = pillH, left = left, right = right,
+                        media = media, timer = timer, battery = battery, accent = colors.accent,
+                        modifier = gestures,
                     )
+
+                    IslandVisual.SPLIT -> SplitPills(
+                        width = pillW, height = pillH, left = left, media = media, timer = timer,
+                        accent = colors.accent, gestures = gestures,
+                    )
+
+                    IslandVisual.EXPANDED -> CompositionLocalProvider(LocalContentColor provides colors.content) {
+                        ExpandedCard(
+                            width = maxExpandedWidth, settings = settings, media = media, timer = timer,
+                            battery = battery, colors = colors, haptics = haptics,
+                            onCollapse = {
+                                haptics.click()
+                                controller.collapse()
+                            },
+                            onSnooze = {
+                                haptics.gesture()
+                                controller.snooze()
+                            },
+                        )
+                    }
                 }
             }
         }
     }
 }
+
+// region Layout helpers ---------------------------------------------------------------------
+
+/**
+ * Lays the child out at its natural size but reports a spring-animated size, keeping the child
+ * top-centered — so the container grows/shrinks around the content like the iPhone island.
+ */
+private fun Modifier.morphSize(
+    anim: Animatable<IntSize, AnimationVector2D>,
+    scope: CoroutineScope,
+): Modifier = layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints.copy(minWidth = 0, minHeight = 0))
+    val target = IntSize(placeable.width, placeable.height)
+    if (anim.targetValue != target) {
+        val snap = anim.value == IntSize.Zero || target == IntSize.Zero
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            if (snap) anim.snapTo(target) else anim.animateTo(target, MorphSpring)
+        }
+    }
+    val current = if (anim.value == IntSize.Zero) target else anim.value
+    layout(current.width, current.height) {
+        placeable.place((current.width - placeable.width) / 2, 0)
+    }
+}
+
+/** Outgoing AnimatedContent children take no space, so the container targets the new size at once. */
+private fun Modifier.zeroSizeWhenExiting(transition: Transition<EnterExitState>): Modifier =
+    layout { measurable, constraints ->
+        val placeable = measurable.measure(constraints)
+        if (transition.targetState == EnterExitState.PostExit) {
+            layout(0, 0) { placeable.place(-placeable.width / 2, 0) }
+        } else {
+            layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+        }
+    }
+
+// endregion
 
 // region Gestures ---------------------------------------------------------------------------
 
@@ -224,13 +397,23 @@ private fun Modifier.islandGestures(
     onTap: () -> Unit,
     onLongPress: () -> Unit,
     onSwipe: (Int) -> Unit,
+    onPressChange: (Boolean) -> Unit,
 ): Modifier {
     val tap by rememberUpdatedState(onTap)
     val long by rememberUpdatedState(onLongPress)
     val swipe by rememberUpdatedState(onSwipe)
+    val press by rememberUpdatedState(onPressChange)
     return this
         .pointerInput(Unit) {
-            detectTapGestures(onTap = { tap() }, onLongPress = { long() })
+            detectTapGestures(
+                onPress = {
+                    press(true)
+                    tryAwaitRelease()
+                    press(false)
+                },
+                onTap = { tap() },
+                onLongPress = { long() },
+            )
         }
         .pointerInput(Unit) {
             val threshold = 36.dp.toPx()
@@ -266,8 +449,9 @@ private fun CompactPill(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier
+        modifier = Modifier
             .size(width, height)
+            .then(modifier)
             .padding(horizontal = height * 0.3f),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -280,7 +464,7 @@ private fun CompactPill(
             when (right) {
                 RightSlot.MEDIA -> Row(verticalAlignment = Alignment.CenterVertically) {
                     if (left != LeftSlot.ART) {
-                        SpinningArt(media.art, media.isPlaying, accent, height - 12.dp)
+                        ArtImage(media.art, accent, Modifier.size(height - 12.dp).clip(CircleShape))
                         Spacer(Modifier.width(6.dp))
                     }
                     Waveform(media.isPlaying, accent, Modifier.size(22.dp, height * 0.42f))
@@ -296,7 +480,7 @@ private fun CompactPill(
 private fun LeftContent(slot: LeftSlot?, timer: TimerState, media: MediaState, accent: Color, height: Dp) {
     when (slot) {
         LeftSlot.TIMER -> {
-            val now = rememberElapsedTicker(timer.running, 200L)
+            val now = rememberElapsedTicker(timer.running, 500L)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = if (timer.mode == TimerMode.STOPWATCH) IslandIcons.Stopwatch else IslandIcons.Hourglass,
@@ -318,7 +502,7 @@ private fun LeftContent(slot: LeftSlot?, timer: TimerState, media: MediaState, a
             }
         }
         LeftSlot.CLOCK -> ClockText(fontSize = (height.value * 0.42f).sp, color = Color.White)
-        LeftSlot.ART -> SpinningArt(media.art, media.isPlaying, accent, height - 10.dp)
+        LeftSlot.ART -> ArtImage(media.art, accent, Modifier.size(height - 10.dp).clip(CircleShape))
         null -> Unit
     }
 }
@@ -373,12 +557,12 @@ private fun SplitPills(
                 contentAlignment = Alignment.Center,
             ) {
                 if (media.art != null) {
-                    SpinningArt(media.art, media.isPlaying, accent, height - 6.dp)
+                    ArtImage(media.art, accent, Modifier.size(height - 6.dp).clip(CircleShape))
                     Box(
                         Modifier
                             .size(height - 6.dp)
                             .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.35f)),
+                            .background(Color.Black.copy(alpha = 0.4f)),
                     )
                 }
                 Waveform(media.isPlaying, accent, Modifier.size(height * 0.5f, height * 0.4f))
@@ -398,8 +582,7 @@ private fun ExpandedCard(
     media: MediaState,
     timer: TimerState,
     battery: BatteryInfo,
-    accent: Color,
-    content: Color,
+    colors: IslandColors,
     haptics: IslandHaptics,
     onCollapse: () -> Unit,
     onSnooze: () -> Unit,
@@ -408,62 +591,62 @@ private fun ExpandedCard(
     Column(
         Modifier
             .width(width)
-            .padding(horizontal = 20.dp, vertical = 18.dp),
+            // Swallow taps on empty parts of the card so they don't collapse it.
+            .pointerInput(Unit) { detectTapGestures { } }
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(verticalAlignment = Alignment.Top) {
+        Row(
+            Modifier.padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Column(
                 Modifier
                     .weight(1f)
                     .clickable(interactionSource = noRipple, indication = null, onClick = onCollapse),
             ) {
-                ExpressiveClock(accent, content)
+                ExpressiveClock(colors.accent, colors.content)
                 val now by rememberWallClock()
                 val date = remember(now / 60_000L) {
                     zoned(now).format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.getDefault()))
+                        .replaceFirstChar { it.titlecase(Locale.getDefault()) }
                 }
-                Text(date, style = MaterialTheme.typography.titleSmall, color = content.copy(alpha = 0.72f))
+                Text(date, style = MaterialTheme.typography.titleSmall, color = colors.contentVariant)
             }
-            Column(horizontalAlignment = Alignment.End) {
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (settings.showBattery && battery.known) {
                     Box(
                         Modifier
                             .clip(RoundedCornerShape(50))
-                            .background(content.copy(alpha = 0.1f))
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                            .background(colors.containerHigh)
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
                     ) {
-                        BatteryChip(battery.level, battery.charging, content, 13.sp)
+                        BatteryChip(battery.level, battery.charging, colors.content, 13.sp)
                     }
-                    Spacer(Modifier.height(8.dp))
                 }
-                Row(
-                    Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(content.copy(alpha = 0.1f))
-                        .clickable(onClick = onSnooze)
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(IslandIcons.Bedtime, null, tint = content, modifier = Modifier.size(14.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Hide 1 min", style = MaterialTheme.typography.labelMedium, color = content)
-                }
+                ExpressiveIconButton(IslandIcons.Bedtime, "Hide for a minute", colors.containerHigh, colors.content, 40.dp, onSnooze)
             }
         }
 
-        Spacer(Modifier.height(14.dp))
-        TimerHub(timer, accent, content, haptics)
-
-        Spacer(Modifier.height(14.dp))
         if (media.isActive) {
-            MediaSection(media, accent, content, haptics)
+            MediaCard(media, colors, haptics)
         } else {
-            Text(
-                text = "Nothing playing. Start music in any app, or turn on the Demo Player in Pixel Island.",
-                style = MaterialTheme.typography.bodySmall,
-                color = content.copy(alpha = 0.6f),
-                modifier = Modifier.padding(horizontal = 4.dp),
-            )
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(colors.containerHigh)
+                    .padding(16.dp),
+            ) {
+                Text(
+                    text = "Nothing playing. Start music in any app, or turn on the Demo player in Pixel Island.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.contentVariant,
+                )
+            }
         }
+
+        TimerCard(timer, colors, haptics)
     }
 }
 
@@ -475,10 +658,10 @@ private fun ExpressiveClock(accent: Color, content: Color) {
     val z = zoned(now)
     val hours = if (is24) "%02d".format(z.hour) else ((z.hour + 11) % 12 + 1).toString()
     val minutes = "%02d".format(z.minute)
-    val big = TextStyle(fontSize = 58.sp, letterSpacing = (-2).sp, fontFeatureSettings = "tnum", lineHeight = 60.sp)
+    val big = TextStyle(fontSize = 60.sp, letterSpacing = (-2).sp, fontFeatureSettings = "tnum", lineHeight = 62.sp)
     Row(verticalAlignment = Alignment.Bottom) {
         RollingText(hours, big.copy(fontWeight = FontWeight.W800, color = accent))
-        Text(":", style = big.copy(fontWeight = FontWeight.W300, color = content.copy(alpha = 0.5f)))
+        Text(":", style = big.copy(fontWeight = FontWeight.W300, color = content.copy(alpha = 0.45f)))
         RollingText(minutes, big.copy(fontWeight = FontWeight.W300, color = content))
         if (!is24) {
             Text(
@@ -506,41 +689,134 @@ private fun RollingText(text: String, style: TextStyle) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun TimerHub(timer: TimerState, accent: Color, content: Color, haptics: IslandHaptics) {
+private fun MediaCard(media: MediaState, colors: IslandColors, haptics: IslandHaptics) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(30.dp))
+            .background(colors.containerHigh)
+            .padding(14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CookieArt(media.art, media.isPlaying, colors.accent, 84.dp)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = media.title,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = colors.content,
+                    maxLines = 1,
+                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE),
+                )
+                Text(
+                    text = media.artist,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.contentVariant,
+                    maxLines = 1,
+                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE),
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(colors.accentContainer)
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Waveform(media.isPlaying, colors.onAccentContainer, Modifier.size(14.dp, 10.dp), smooth = true)
+                    Spacer(Modifier.width(6.dp))
+                    Text(media.appName, style = MaterialTheme.typography.labelMedium, color = colors.onAccentContainer, maxLines = 1)
+                }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        val now = rememberElapsedTicker(media.isPlaying, 250L)
+        val position = media.positionAt(now)
+        val duration = media.durationMs
+        SquigglySlider(
+            progress = if (duration > 0) position.toFloat() / duration else 0f,
+            playing = media.isPlaying,
+            color = colors.accent,
+            trackColor = colors.content.copy(alpha = 0.18f),
+            onSeek = { fraction ->
+                if (duration > 0) {
+                    haptics.tick()
+                    MediaRepository.seekTo((fraction * duration).toLong())
+                }
+            },
+        )
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+            Text(formatDuration(position), style = MaterialTheme.typography.labelMedium, color = colors.contentVariant)
+            Spacer(Modifier.weight(1f))
+            Text(
+                if (duration > 0) formatDuration(duration) else "--:--",
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.contentVariant,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        MediaButtonGroup(
+            playing = media.isPlaying,
+            accent = colors.accent,
+            onAccent = colors.onAccent,
+            tonal = colors.accentContainer,
+            onTonal = colors.onAccentContainer,
+            onPrevious = {
+                haptics.click()
+                MediaRepository.previous()
+            },
+            onToggle = {
+                haptics.confirm()
+                MediaRepository.togglePlayPause()
+            },
+            onNext = {
+                haptics.click()
+                MediaRepository.next()
+            },
+        )
+    }
+}
+
+@Composable
+private fun TimerCard(timer: TimerState, colors: IslandColors, haptics: IslandHaptics) {
     val now = rememberElapsedTicker(timer.running, 100L)
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(content.copy(alpha = 0.08f))
+            .clip(RoundedCornerShape(30.dp))
+            .background(colors.containerHigh)
             .padding(14.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            ModeChip("Stopwatch", timer.mode == TimerMode.STOPWATCH, accent, content) {
+            SegmentedToggle(
+                options = listOf("Stopwatch", "Timer"),
+                selected = if (timer.mode == TimerMode.STOPWATCH) 0 else 1,
+                accent = colors.accent,
+                onAccent = colors.onAccent,
+                tonal = colors.accentContainer,
+                onTonal = colors.onAccentContainer,
+            ) { index ->
                 haptics.tick()
-                TimerRepository.setMode(TimerMode.STOPWATCH)
-            }
-            Spacer(Modifier.width(8.dp))
-            ModeChip("Timer", timer.mode == TimerMode.TIMER, accent, content) {
-                haptics.tick()
-                TimerRepository.setMode(TimerMode.TIMER)
+                TimerRepository.setMode(if (index == 0) TimerMode.STOPWATCH else TimerMode.TIMER)
             }
             Spacer(Modifier.weight(1f))
             if (timer.mode == TimerMode.TIMER) {
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(50))
-                        .background(content.copy(alpha = 0.1f))
-                        .clickable {
+                        .background(colors.accentContainer)
+                        .smokeClickable(colors.onAccentContainer) {
                             haptics.tick()
                             TimerRepository.addMinute()
                         }
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(IslandIcons.Add, null, tint = content, modifier = Modifier.size(14.dp))
-                    Text("1 min", style = MaterialTheme.typography.labelMedium, color = content)
+                    Icon(IslandIcons.Add, null, tint = colors.onAccentContainer, modifier = Modifier.size(16.dp))
+                    Text("1 min", style = MaterialTheme.typography.labelLarge, color = colors.onAccentContainer)
                 }
             }
         }
@@ -551,117 +827,20 @@ private fun TimerHub(timer: TimerState, accent: Color, content: Color, haptics: 
                     timer.displayMsAt(now),
                     tenths = timer.mode == TimerMode.STOPWATCH,
                 ),
-                color = if (timer.running || timer.finished) accent else content,
+                color = if (timer.running || timer.finished) colors.accent else colors.content,
                 maxLines = 1,
-                style = TextStyle(fontSize = 32.sp, fontWeight = FontWeight.W600, fontFeatureSettings = "tnum"),
+                style = TextStyle(fontSize = 34.sp, fontWeight = FontWeight.W600, fontFeatureSettings = "tnum"),
                 modifier = Modifier.weight(1f),
             )
-            ExpressiveIconButton(IslandIcons.Reset, "Reset", content.copy(alpha = 0.12f), content, 46.dp) {
+            ExpressiveIconButton(IslandIcons.Reset, "Reset", colors.accentContainer, colors.onAccentContainer, 48.dp) {
                 haptics.click()
                 TimerRepository.reset()
             }
             Spacer(Modifier.width(10.dp))
-            MorphPlayButton(timer.running, accent, accent.readableOn(), 54.dp) {
-                haptics.click()
+            MorphPlayButton(timer.running, colors.accent, colors.onAccent, 60.dp) {
+                haptics.confirm()
                 TimerRepository.toggle()
             }
-        }
-    }
-}
-
-@Composable
-private fun ModeChip(label: String, selected: Boolean, accent: Color, content: Color, onClick: () -> Unit) {
-    val bg by animateColorAsState(if (selected) accent else content.copy(alpha = 0.1f), label = "chipBg")
-    val fg by animateColorAsState(if (selected) accent.readableOn() else content, label = "chipFg")
-    val corner by animateDpAsState(if (selected) 12.dp else 18.dp, islandSpring(), label = "chipCorner")
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(corner))
-            .background(bg)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-    ) {
-        Text(label, style = MaterialTheme.typography.labelLarge, color = fg)
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun MediaSection(media: MediaState, accent: Color, content: Color, haptics: IslandHaptics) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        ArtImage(
-            art = media.art,
-            accent = accent,
-            modifier = Modifier
-                .size(76.dp)
-                .clip(RoundedCornerShape(22.dp)),
-        )
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = media.title,
-                style = MaterialTheme.typography.titleMedium,
-                color = content,
-                maxLines = 1,
-                modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE),
-            )
-            Text(
-                text = media.artist,
-                style = MaterialTheme.typography.bodyMedium,
-                color = content.copy(alpha = 0.75f),
-                maxLines = 1,
-                modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE),
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(media.appName, style = MaterialTheme.typography.labelSmall, color = accent, maxLines = 1)
-        }
-        Spacer(Modifier.width(8.dp))
-        Waveform(media.isPlaying, accent, Modifier.size(28.dp, 20.dp))
-    }
-
-    Spacer(Modifier.height(10.dp))
-    val now = rememberElapsedTicker(media.isPlaying, 100L)
-    val position = media.positionAt(now)
-    val duration = media.durationMs
-    SquigglySlider(
-        progress = if (duration > 0) position.toFloat() / duration else 0f,
-        playing = media.isPlaying,
-        color = accent,
-        trackColor = content.copy(alpha = 0.22f),
-        onSeek = { fraction ->
-            if (duration > 0) {
-                haptics.tick()
-                MediaRepository.seekTo((fraction * duration).toLong())
-            }
-        },
-    )
-    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
-        Text(formatDuration(position), style = MaterialTheme.typography.labelSmall, color = content.copy(alpha = 0.7f))
-        Spacer(Modifier.weight(1f))
-        Text(
-            if (duration > 0) formatDuration(duration) else "--:--",
-            style = MaterialTheme.typography.labelSmall,
-            color = content.copy(alpha = 0.7f),
-        )
-    }
-
-    Spacer(Modifier.height(8.dp))
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ExpressiveIconButton(IslandIcons.SkipPrevious, "Previous", content.copy(alpha = 0.12f), content) {
-            haptics.click()
-            MediaRepository.previous()
-        }
-        MorphPlayButton(media.isPlaying, accent, accent.readableOn(), 64.dp) {
-            haptics.confirm()
-            MediaRepository.togglePlayPause()
-        }
-        ExpressiveIconButton(IslandIcons.SkipNext, "Next", content.copy(alpha = 0.12f), content) {
-            haptics.click()
-            MediaRepository.next()
         }
     }
 }
