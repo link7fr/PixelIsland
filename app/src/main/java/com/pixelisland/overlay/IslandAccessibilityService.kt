@@ -39,78 +39,66 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
- * Hosts the island as a TYPE_ACCESSIBILITY_OVERLAY window over the status bar and camera.
+ * Hosts the island with two TYPE_ACCESSIBILITY_OVERLAY windows. Neither ever changes size during
+ * an animation (resizing a window makes Android stretch the stale frame → black rectangles):
  *
- * The window has two fixed sizes and never resizes during an animation:
- *  - small: just around the pill, so the rest of the status bar stays touchable;
- *  - big: full width, tall enough for the card. Entered one frame *before* expanding and left
- *    only after the collapse spring has settled. All motion happens inside Compose.
+ *  - Visual window: full width, fixed height, draws the island. Pass-through (NOT_TOUCHABLE)
+ *    while collapsed; touchable while expanded so the card's buttons work and taps beside the
+ *    card collapse it.
+ *  - Touch window: invisible, exactly over the pill; turns taps / long-press / swipes into
+ *    island gestures while collapsed. Draws nothing, so it can't glitch.
  */
 class IslandAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "PixelIsland/Overlay"
 
-        /** Room around the pill for the press "squish" and spring overshoot. */
+        /** Room above the pill for the press "squish" and spring overshoot. */
         const val WINDOW_MARGIN_DP = 12f
-        private const val BIG_WINDOW_HEIGHT_DP = 640f
+
+        /** Tall enough for the expanded card plus its shadow. */
+        private const val VISUAL_WINDOW_HEIGHT_DP = 340f
 
         private val _running = MutableStateFlow(false)
         val running: StateFlow<Boolean> = _running.asStateFlow()
     }
 
     private var windowManager: WindowManager? = null
-    private var root: IslandRootLayout? = null
-    private var params: WindowManager.LayoutParams? = null
+    private var visualRoot: IslandRootLayout? = null
+    private var visualParams: WindowManager.LayoutParams? = null
+    private var touchView: IslandTouchView? = null
+    private var touchParams: WindowManager.LayoutParams? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
     private var scope: CoroutineScope? = null
-    private val controller = IslandController()
-
-    private val host = object : IslandController.Host {
-        override fun prepareExpand(proceed: () -> Unit) {
-            val view = root ?: return proceed()
-            if (!controller.bigWindow) {
-                controller.bigWindow = true
-                applyLayout()
-            }
-            // Let the window relayout at its new size before the morph begins.
-            view.post { view.postOnAnimation { proceed() } }
-        }
-
-        override fun onCollapseSettled() {
-            if (controller.bigWindow && !controller.expanded) {
-                controller.bigWindow = false
-                applyLayout()
-            }
-        }
-    }
+    private val controller = IslandController().apply { offsetInsideWindow = true }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         _running.value = true
         IslandSettings.init(this)
         MediaRepository.attachSessions(this)
-        controller.host = host
         try {
-            addOverlay()
+            addWindows()
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to add island overlay", t)
-            removeOverlay()
+            removeWindows()
             return
         }
         scope = MainScope().also { s ->
             s.launch {
-                combine(IslandSettings.state, snapshotFlow { controller.bigWindow }) { a, b -> a to b }
-                    .collect { applyLayout() }
+                combine(IslandSettings.state, snapshotFlow { controller.expanded }) { a, b -> a to b }
+                    .collect { (settings, expanded) -> applyLayout(settings, expanded) }
             }
         }
     }
 
-    private fun addOverlay() {
-        if (root != null) return
+    private fun addWindows() {
+        if (visualRoot != null) return
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         windowManager = wm
+        val settings = IslandSettings.state.value
 
+        // --- Visual window -------------------------------------------------------------------
         val owner = OverlayLifecycleOwner().also { it.onCreate() }
         lifecycleOwner = owner
 
@@ -119,11 +107,11 @@ class IslandAccessibilityService : AccessibilityService() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setContent {
                 IslandOverlayTheme {
-                    val width = (LocalConfiguration.current.screenWidthDp - 16).coerceIn(260, 420)
+                    val width = (LocalConfiguration.current.screenWidthDp - 24).coerceIn(260, 384)
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            // Taps on the transparent part of the big window collapse the card.
+                            // Only reachable while expanded: taps beside the card collapse it.
                             .pointerInput(Unit) { detectTapGestures { controller.collapse() } },
                         contentAlignment = Alignment.TopCenter,
                     ) {
@@ -140,84 +128,127 @@ class IslandAccessibilityService : AccessibilityService() {
             composeView,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
         )
-        // Owners on the root (view-tree lookup walks up parents) and on the ComposeView itself.
         owner.attachTo(layout)
         owner.attachTo(composeView)
 
-        val lp = WindowManager.LayoutParams(
-            1, 1,
+        val vp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            dp(VISUAL_WINDOW_HEIGHT_DP),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            visualFlags(expanded = false),
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            windowAnimations = 0
             title = "PixelIsland"
+            x = 0
+            y = dp(settings.offsetY - WINDOW_MARGIN_DP)
         }
-        computeLayout(lp, IslandSettings.state.value, big = false)
-        params = lp
-
-        wm.addView(layout, lp)
-        root = layout
+        wm.addView(layout, vp)
+        visualRoot = layout
+        visualParams = vp
         owner.onResume()
-        updateVisibility()
-    }
 
-    private fun computeLayout(lp: WindowManager.LayoutParams, s: Settings, big: Boolean) {
-        val margin = WINDOW_MARGIN_DP
-        if (big) {
-            lp.width = WindowManager.LayoutParams.MATCH_PARENT
-            lp.height = minOf(resources.displayMetrics.heightPixels, dp(BIG_WINDOW_HEIGHT_DP))
-            lp.x = 0
-        } else {
-            lp.width = dp(s.pillWidth + margin * 2)
-            lp.height = dp(s.pillHeight + margin * 2)
-            lp.x = dp(s.offsetX)
+        // --- Touch window --------------------------------------------------------------------
+        val tv = IslandTouchView(this, controller)
+        val tp = WindowManager.LayoutParams(
+            dp(settings.pillWidth),
+            dp(settings.pillHeight),
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            touchFlags(expanded = false),
+            PixelFormat.TRANSPARENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            windowAnimations = 0
+            title = "PixelIslandTouch"
+            x = dp(settings.offsetX)
+            y = dp(settings.offsetY)
         }
-        lp.y = dp(s.offsetY - margin)
+        wm.addView(tv, tp)
+        touchView = tv
+        touchParams = tp
+
+        updateVisibility(settings)
     }
 
-    private fun applyLayout() {
+    private fun visualFlags(expanded: Boolean): Int {
+        var f = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        f = if (expanded) f or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+        else f or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        return f
+    }
+
+    private fun touchFlags(expanded: Boolean): Int {
+        var f = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        if (expanded) f = f or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        return f
+    }
+
+    /** Only flags and positions change here — the visual window's size is constant. */
+    private fun applyLayout(settings: Settings, expanded: Boolean) {
         val wm = windowManager ?: return
-        val view = root ?: return
-        val lp = params ?: return
-        val before = Triple(lp.width, lp.height, lp.x) to lp.y
-        computeLayout(lp, IslandSettings.state.value, controller.bigWindow)
-        if (before != (Triple(lp.width, lp.height, lp.x) to lp.y)) {
-            runCatching { wm.updateViewLayout(view, lp) }
+        visualRoot?.let { view ->
+            val lp = visualParams ?: return@let
+            val flags = visualFlags(expanded)
+            val y = dp(settings.offsetY - WINDOW_MARGIN_DP)
+            if (lp.flags != flags || lp.y != y) {
+                lp.flags = flags
+                lp.y = y
+                runCatching { wm.updateViewLayout(view, lp) }
+            }
         }
-        updateVisibility()
+        touchView?.let { view ->
+            val lp = touchParams ?: return@let
+            val flags = touchFlags(expanded)
+            val w = dp(settings.pillWidth)
+            val h = dp(settings.pillHeight)
+            val x = dp(settings.offsetX)
+            val y = dp(settings.offsetY)
+            if (lp.flags != flags || lp.width != w || lp.height != h || lp.x != x || lp.y != y) {
+                lp.flags = flags
+                lp.width = w
+                lp.height = h
+                lp.x = x
+                lp.y = y
+                runCatching { wm.updateViewLayout(view, lp) }
+            }
+        }
+        updateVisibility(settings)
     }
 
-    private fun updateVisibility() {
-        val settings = IslandSettings.state.value
+    private fun updateVisibility(settings: Settings = IslandSettings.state.value) {
         val portrait = resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
-        val visible = settings.islandEnabled && portrait
-        root?.visibility = if (visible) View.VISIBLE else View.GONE
+        val v = if (settings.islandEnabled && portrait) View.VISIBLE else View.GONE
+        visualRoot?.visibility = v
+        touchView?.visibility = v
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) controller.collapse()
-        applyLayout()
+        updateVisibility()
     }
 
     private fun dp(value: Float): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, resources.displayMetrics).toInt()
 
-    private fun removeOverlay() {
-        controller.host = null
+    private fun removeWindows() {
         scope?.cancel()
         scope = null
         lifecycleOwner?.onDestroy()
         lifecycleOwner = null
-        root?.let { view -> runCatching { windowManager?.removeViewImmediate(view) } }
-        root = null
-        params = null
+        visualRoot?.let { runCatching { windowManager?.removeViewImmediate(it) } }
+        touchView?.let { runCatching { windowManager?.removeViewImmediate(it) } }
+        visualRoot = null
+        visualParams = null
+        touchView = null
+        touchParams = null
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -225,13 +256,13 @@ class IslandAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     override fun onUnbind(intent: Intent?): Boolean {
-        removeOverlay()
+        removeWindows()
         _running.value = false
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        removeOverlay()
+        removeWindows()
         _running.value = false
         super.onDestroy()
     }

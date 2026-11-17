@@ -209,7 +209,7 @@ private fun PreviewCard(pillHeight: Float) {
                     .heightIn(min = 96.dp),
                 contentAlignment = Alignment.TopCenter,
             ) {
-                val previewWidth = maxWidth - 16.dp
+                val previewWidth = (maxWidth - 16.dp).coerceAtMost(384.dp)
                 // Fake punch-hole camera, sitting underneath the island like on a real phone.
                 Box(
                     Modifier

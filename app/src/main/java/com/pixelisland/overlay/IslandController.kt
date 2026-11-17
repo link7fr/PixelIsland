@@ -9,31 +9,32 @@ import androidx.compose.runtime.setValue
 @Stable
 class IslandController {
 
-    /**
-     * Implemented by the overlay service. The window is kept pill-sized while collapsed so it
-     * never blocks the status bar; it is grown *before* the expand animation starts and shrunk
-     * only *after* the collapse animation has fully settled, so the morph is never clipped.
-     */
-    interface Host {
-        fun prepareExpand(proceed: () -> Unit)
-        fun onCollapseSettled()
+    /** Island gesture actions, provided by the composable so they can use its haptics/state. */
+    interface GestureHandler {
+        fun onTap()
+        fun onLongPress()
+        fun onSwipe(direction: Int)
     }
 
-    var host: Host? = null
+    var gestureHandler: GestureHandler? = null
 
     var expanded by mutableStateOf(false)
         private set
     var snoozed by mutableStateOf(false)
         private set
 
-    /** True while the overlay window is in its large (expanded-capable) size. */
-    var bigWindow by mutableStateOf(false)
+    /** Finger is down on the pill (set by the overlay's touch window). */
+    var pressed by mutableStateOf(false)
+
+    /**
+     * True for the overlay: its drawing window is full-width at x = 0, so the island applies the
+     * horizontal calibration offset itself.
+     */
+    var offsetInsideWindow = false
 
     fun expand() {
         snoozed = false
-        if (expanded) return
-        val h = host
-        if (h == null) expanded = true else h.prepareExpand { expanded = true }
+        expanded = true
     }
 
     fun collapse() {
@@ -49,10 +50,6 @@ class IslandController {
 
     fun unsnooze() {
         snoozed = false
-    }
-
-    fun notifyCollapseSettled() {
-        host?.onCollapseSettled()
     }
 
     companion object {

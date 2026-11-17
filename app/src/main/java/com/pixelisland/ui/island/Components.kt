@@ -442,6 +442,7 @@ fun MediaButtonGroup(
     onToggle: () -> Unit,
     onNext: () -> Unit,
     modifier: Modifier = Modifier,
+    height: Dp = 64.dp,
 ) {
     val prevSrc = remember { MutableInteractionSource() }
     val playSrc = remember { MutableInteractionSource() }
@@ -454,22 +455,22 @@ fun MediaButtonGroup(
     val wPlay by animateFloatAsState(if (playP) 2.0f else if (prevP || nextP) 1.55f else 1.75f, bouncySpring(), label = "wPlay")
     val wNext by animateFloatAsState(if (nextP) 1.3f else if (playP || prevP) 0.88f else 1f, bouncySpring(), label = "wNext")
 
-    Row(modifier.fillMaxWidth().height(64.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(modifier.fillMaxWidth().height(height), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         GroupButton(
             modifier = Modifier.weight(wPrev),
             shape = groupShape(GroupPos.START, prevP, false),
             container = tonal, content = onTonal, source = prevSrc, onClick = onPrevious,
-        ) { Icon(IslandIcons.SkipPrevious, "Previous", tint = onTonal, modifier = Modifier.size(28.dp)) }
+        ) { Icon(IslandIcons.SkipPrevious, "Previous", tint = onTonal, modifier = Modifier.size(height * 0.44f)) }
         GroupButton(
             modifier = Modifier.weight(wPlay),
             shape = groupShape(GroupPos.MIDDLE, playP, playing),
             container = accent, content = onAccent, source = playSrc, onClick = onToggle,
-        ) { PlayPauseIcon(playing, onAccent, 32.dp) }
+        ) { PlayPauseIcon(playing, onAccent, height * 0.5f) }
         GroupButton(
             modifier = Modifier.weight(wNext),
             shape = groupShape(GroupPos.END, nextP, false),
             container = tonal, content = onTonal, source = nextSrc, onClick = onNext,
-        ) { Icon(IslandIcons.SkipNext, "Next", tint = onTonal, modifier = Modifier.size(28.dp)) }
+        ) { Icon(IslandIcons.SkipNext, "Next", tint = onTonal, modifier = Modifier.size(height * 0.44f)) }
     }
 }
 
